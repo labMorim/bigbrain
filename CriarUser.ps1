@@ -1,51 +1,91 @@
-# Script para Criação de Usuários no Microsoft Entra ID
-# Requisitos: Módulo Microsoft.Graph instalado
-# Install-Module Microsoft.Graph -Scope CurrentUser
+# ===============================================================================
+# SCRIPT DE CRIAÇÃO DE USUÁRIO - MICROSOFT ENTRA ID
+# Otimizado para N8N - Sem dependências de módulos PowerShell
+# Usa Microsoft Graph API via Invoke-WebRequest
+# ===============================================================================
 
 param(
+    # === PLACEHOLDERS PARA EDIÇÃO PELO LLM ===
     [Parameter(Mandatory=$true)]
-    [string]$DisplayName,
+    [string]$FirstName = "{{FIRST_NAME}}",
     
     [Parameter(Mandatory=$true)]
-    [string]$UserPrincipalName,
+    [string]$LastName = "{{LAST_NAME}}",
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Domain = "{{DOMAIN}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$GivenName,
+    [string]$JobTitle = "{{JOB_TITLE}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$Surname,
+    [string]$Department = "{{DEPARTMENT}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$JobTitle,
+    [string]$OfficeLocation = "{{OFFICE_LOCATION}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$Department,
+    [string]$MobilePhone = "{{MOBILE_PHONE}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$OfficeLocation,
+    [string]$License = "{{LICENSE_SKU}}",
     
     [Parameter(Mandatory=$false)]
-    [string]$MobilePhone,
+    [string[]]$Groups = @("{{GROUP_1}}", "{{GROUP_2}}"),
     
     [Parameter(Mandatory=$false)]
-    [string]$BusinessPhone,
+    [string]$ManagerEmail = "{{MANAGER_EMAIL}}",
     
-    [Parameter(Mandatory=$false)]
-    [string]$ManagerUPN,
+    # === CREDENCIAIS DO SERVICE PRINCIPAL ===
+    [Parameter(Mandatory=$true)]
+    [string]$TenantId = "{{TENANT_ID}}",
     
-    [Parameter(Mandatory=$false)]
-    [string[]]$GroupNames,
+    [Parameter(Mandatory=$true)]
+    [string]$ClientId = "{{CLIENT_ID}}",
     
-    [Parameter(Mandatory=$false)]
-    [switch]$ForcePasswordChange = $true,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$LicenseSku
+    [Parameter(Mandatory=$true)]
+    [string]$ClientSecret = "{{CLIENT_SECRET}}"
 )
 
-# Função para gerar senha aleatória
-function Generate-RandomPassword {
-    param([int]$Length = 12)
+# ===============================================================================
+# CONFIGURAÇÕES E VARIÁVEIS
+# ===============================================================================
+
+# URLs da Microsoft Graph API
+$GraphBaseUrl = "https://graph.microsoft.com/v1.0"
+$TokenUrl = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+
+# Variáveis derivadas dos parâmetros
+$DisplayName = "$FirstName $LastName"
+$UserPrincipalName = "$($FirstName.ToLower()).$($LastName.ToLower())@$Domain"
+$MailNickname = "$($FirstName.ToLower()).$($LastName.ToLower())"
+
+# ===============================================================================
+# FUNÇÕES AUXILIARES
+# ===============================================================================
+
+function Get-AccessToken {
+    param($TenantId, $ClientId, $ClientSecret)
+    
+    $Body = @{
+        grant_type = "client_credentials"
+        scope = "https://graph.microsoft.com/.default"
+        client_id = $ClientId
+        client_secret = $ClientSecret
+    }
+    
+    try {
+        $Response = Invoke-RestMethod -Uri $TokenUrl -Method POST -Body $Body -ContentType "application/x-www-form-urlencoded"
+        return $Response.access_token
+    }
+    catch {
+        Write-Error "Erro ao obter token de acesso: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function Generate-SecurePassword {
+    param([int]$Length = 16)
     
     $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
     $password = ""
@@ -55,164 +95,213 @@ function Generate-RandomPassword {
     return $password
 }
 
-# Função para verificar se o módulo está instalado
-function Test-GraphModule {
-    if (!(Get-Module -ListAvailable -Name Microsoft.Graph)) {
-        Write-Error "Módulo Microsoft.Graph não encontrado. Execute: Install-Module Microsoft.Graph -Scope CurrentUser"
-        exit 1
+function Invoke-GraphAPI {
+    param(
+        [string]$AccessToken,
+        [string]$Uri,
+        [string]$Method = "GET",
+        [object]$Body = $null
+    )
+    
+    $Headers = @{
+        Authorization = "Bearer $AccessToken"
+        "Content-Type" = "application/json"
     }
-}
-
-# Função principal para criar usuário
-function New-EntraUser {
+    
+    $Params = @{
+        Uri = $Uri
+        Method = $Method
+        Headers = $Headers
+    }
+    
+    if ($Body) {
+        $Params.Body = ($Body | ConvertTo-Json -Depth 10)
+    }
+    
     try {
-        # Verificar módulo
-        Test-GraphModule
-        
-        # Conectar ao Microsoft Graph
-        Write-Host "Conectando ao Microsoft Graph..." -ForegroundColor Yellow
-        Connect-MgGraph -Scopes "User.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"
-        
-        # Gerar senha temporária
-        $temporaryPassword = Generate-RandomPassword -Length 16
-        
-        # Preparar parâmetros do usuário
-        $userParams = @{
-            DisplayName = $DisplayName
-            UserPrincipalName = $UserPrincipalName
-            MailNickname = ($UserPrincipalName -split '@')[0]
-            AccountEnabled = $true
-            PasswordProfile = @{
-                Password = $temporaryPassword
-                ForceChangePasswordNextSignIn = $ForcePasswordChange
-            }
+        return Invoke-RestMethod @Params
+    }
+    catch {
+        $ErrorDetails = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+        if ($ErrorDetails) {
+            Write-Error "Graph API Error: $($ErrorDetails.error.message)"
+        } else {
+            Write-Error "Graph API Error: $($_.Exception.Message)"
         }
-        
-        # Adicionar campos opcionais se fornecidos
-        if ($GivenName) { $userParams.GivenName = $GivenName }
-        if ($Surname) { $userParams.Surname = $Surname }
-        if ($JobTitle) { $userParams.JobTitle = $JobTitle }
-        if ($Department) { $userParams.Department = $Department }
-        if ($OfficeLocation) { $userParams.OfficeLocation = $OfficeLocation }
-        if ($MobilePhone) { $userParams.MobilePhone = $MobilePhone }
-        if ($BusinessPhone) { $userParams.BusinessPhones = @($BusinessPhone) }
-        
-        # Criar usuário
-        Write-Host "Criando usuário: $DisplayName" -ForegroundColor Green
-        $newUser = New-MgUser @userParams
-        
-        Write-Host "✓ Usuário criado com sucesso!" -ForegroundColor Green
-        Write-Host "User ID: $($newUser.Id)" -ForegroundColor Cyan
-        Write-Host "UPN: $($newUser.UserPrincipalName)" -ForegroundColor Cyan
-        Write-Host "Senha temporária: $temporaryPassword" -ForegroundColor Yellow
-        
-        # Definir gerente se especificado
-        if ($ManagerUPN) {
-            try {
-                $manager = Get-MgUser -Filter "userPrincipalName eq '$ManagerUPN'"
-                if ($manager) {
-                    $managerRef = @{
-                        "@odata.id" = "https://graph.microsoft.com/v1.0/users/$($manager.Id)"
-                    }
-                    Set-MgUserManagerByRef -UserId $newUser.Id -BodyParameter $managerRef
-                    Write-Host "✓ Gerente definido: $ManagerUPN" -ForegroundColor Green
-                } else {
-                    Write-Warning "Gerente não encontrado: $ManagerUPN"
+        throw
+    }
+}
+
+# ===============================================================================
+# SCRIPT PRINCIPAL
+# ===============================================================================
+
+try {
+    Write-Host "=== INICIANDO CRIAÇÃO DE USUÁRIO ===" -ForegroundColor Cyan
+    Write-Host "Usuário: $DisplayName ($UserPrincipalName)" -ForegroundColor Yellow
+    
+    # 1. OBTER TOKEN DE ACESSO
+    Write-Host "`n[1/6] Obtendo token de acesso..." -ForegroundColor Green
+    $AccessToken = Get-AccessToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+    Write-Host "✓ Token obtido com sucesso" -ForegroundColor Green
+    
+    # 2. GERAR SENHA TEMPORÁRIA
+    Write-Host "`n[2/6] Gerando senha temporária..." -ForegroundColor Green
+    $TempPassword = Generate-SecurePassword -Length 16
+    Write-Host "✓ Senha gerada: $TempPassword" -ForegroundColor Yellow
+    
+    # 3. CRIAR USUÁRIO
+    Write-Host "`n[3/6] Criando usuário..." -ForegroundColor Green
+    
+    $UserBody = @{
+        displayName = $DisplayName
+        userPrincipalName = $UserPrincipalName
+        mailNickname = $MailNickname
+        accountEnabled = $true
+        passwordProfile = @{
+            password = $TempPassword
+            forceChangePasswordNextSignIn = $true
+        }
+    }
+    
+    # Adicionar campos opcionais se não forem placeholders
+    if ($FirstName -ne "{{FIRST_NAME}}") { $UserBody.givenName = $FirstName }
+    if ($LastName -ne "{{LAST_NAME}}") { $UserBody.surname = $LastName }
+    if ($JobTitle -ne "{{JOB_TITLE}}" -and $JobTitle) { $UserBody.jobTitle = $JobTitle }
+    if ($Department -ne "{{DEPARTMENT}}" -and $Department) { $UserBody.department = $Department }
+    if ($OfficeLocation -ne "{{OFFICE_LOCATION}}" -and $OfficeLocation) { $UserBody.officeLocation = $OfficeLocation }
+    if ($MobilePhone -ne "{{MOBILE_PHONE}}" -and $MobilePhone) { $UserBody.mobilePhone = $MobilePhone }
+    
+    $NewUser = Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/users" -Method "POST" -Body $UserBody
+    Write-Host "✓ Usuário criado: $($NewUser.id)" -ForegroundColor Green
+    
+    # 4. DEFINIR GERENTE (se especificado)
+    if ($ManagerEmail -ne "{{MANAGER_EMAIL}}" -and $ManagerEmail) {
+        Write-Host "`n[4/6] Definindo gerente..." -ForegroundColor Green
+        try {
+            $Manager = Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/users?`$filter=userPrincipalName eq '$ManagerEmail'"
+            if ($Manager.value -and $Manager.value.Count -gt 0) {
+                $ManagerRef = @{
+                    "@odata.id" = "$GraphBaseUrl/users/$($Manager.value[0].id)"
                 }
-            } catch {
-                Write-Warning "Erro ao definir gerente: $($_.Exception.Message)"
+                Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/users/$($NewUser.id)/manager/`$ref" -Method "PUT" -Body $ManagerRef
+                Write-Host "✓ Gerente definido: $ManagerEmail" -ForegroundColor Green
+            } else {
+                Write-Warning "Gerente não encontrado: $ManagerEmail"
             }
         }
-        
-        # Adicionar a grupos se especificado
-        if ($GroupNames) {
-            foreach ($groupName in $GroupNames) {
+        catch {
+            Write-Warning "Erro ao definir gerente: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host "`n[4/6] Pulando definição de gerente (não especificado)" -ForegroundColor Yellow
+    }
+    
+    # 5. ADICIONAR A GRUPOS (se especificados)
+    if ($Groups -and $Groups[0] -ne "{{GROUP_1}}") {
+        Write-Host "`n[5/6] Adicionando a grupos..." -ForegroundColor Green
+        foreach ($GroupName in $Groups) {
+            if ($GroupName -and $GroupName -notlike "{{*}}") {
                 try {
-                    $group = Get-MgGroup -Filter "displayName eq '$groupName'"
-                    if ($group) {
-                        $groupMember = @{
-                            "@odata.id" = "https://graph.microsoft.com/v1.0/users/$($newUser.Id)"
+                    $Group = Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/groups?`$filter=displayName eq '$GroupName'"
+                    if ($Group.value -and $Group.value.Count -gt 0) {
+                        $MemberRef = @{
+                            "@odata.id" = "$GraphBaseUrl/users/$($NewUser.id)"
                         }
-                        New-MgGroupMember -GroupId $group.Id -BodyParameter $groupMember
-                        Write-Host "✓ Adicionado ao grupo: $groupName" -ForegroundColor Green
+                        Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/groups/$($Group.value[0].id)/members/`$ref" -Method "POST" -Body $MemberRef
+                        Write-Host "✓ Adicionado ao grupo: $GroupName" -ForegroundColor Green
                     } else {
-                        Write-Warning "Grupo não encontrado: $groupName"
+                        Write-Warning "Grupo não encontrado: $GroupName"
                     }
-                } catch {
-                    Write-Warning "Erro ao adicionar ao grupo $groupName : $($_.Exception.Message)"
+                }
+                catch {
+                    Write-Warning "Erro ao adicionar ao grupo $GroupName : $($_.Exception.Message)"
                 }
             }
         }
-        
-        # Atribuir licença se especificada
-        if ($LicenseSku) {
-            try {
-                $license = Get-MgSubscribedSku | Where-Object { $_.SkuPartNumber -eq $LicenseSku }
-                if ($license -and $license.PrepaidUnits.Enabled -gt 0) {
-                    $licenseParams = @{
-                        AddLicenses = @(
-                            @{
-                                SkuId = $license.SkuId
-                                DisabledPlans = @()
-                            }
-                        )
-                        RemoveLicenses = @()
-                    }
-                    Set-MgUserLicense -UserId $newUser.Id -BodyParameter $licenseParams
-                    Write-Host "✓ Licença atribuída: $LicenseSku" -ForegroundColor Green
-                } else {
-                    Write-Warning "Licença não encontrada ou não disponível: $LicenseSku"
-                }
-            } catch {
-                Write-Warning "Erro ao atribuir licença: $($_.Exception.Message)"
-            }
-        }
-        
-        # Exibir resumo
-        Write-Host "`n=== RESUMO DA CRIAÇÃO ===" -ForegroundColor Magenta
-        Write-Host "Nome: $DisplayName"
-        Write-Host "UPN: $UserPrincipalName"
-        Write-Host "ID: $($newUser.Id)"
-        Write-Host "Senha temporária: $temporaryPassword"
-        Write-Host "Forçar mudança de senha: $ForcePasswordChange"
-        
-        return $newUser
-        
-    } catch {
-        Write-Error "Erro ao criar usuário: $($_.Exception.Message)"
-        return $null
-    } finally {
-        # Desconectar
-        Disconnect-MgGraph -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "`n[5/6] Pulando adição a grupos (não especificados)" -ForegroundColor Yellow
     }
+    
+    # 6. ATRIBUIR LICENÇA (se especificada)
+    if ($License -ne "{{LICENSE_SKU}}" -and $License) {
+        Write-Host "`n[6/6] Atribuindo licença..." -ForegroundColor Green
+        try {
+            $Skus = Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/subscribedSkus"
+            $TargetSku = $Skus.value | Where-Object { $_.skuPartNumber -eq $License }
+            
+            if ($TargetSku -and $TargetSku.prepaidUnits.enabled -gt 0) {
+                $LicenseBody = @{
+                    addLicenses = @(
+                        @{
+                            skuId = $TargetSku.skuId
+                            disabledPlans = @()
+                        }
+                    )
+                    removeLicenses = @()
+                }
+                Invoke-GraphAPI -AccessToken $AccessToken -Uri "$GraphBaseUrl/users/$($NewUser.id)/assignLicense" -Method "POST" -Body $LicenseBody
+                Write-Host "✓ Licença atribuída: $License" -ForegroundColor Green
+            } else {
+                Write-Warning "Licença não encontrada ou indisponível: $License"
+            }
+        }
+        catch {
+            Write-Warning "Erro ao atribuir licença: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host "`n[6/6] Pulando atribuição de licença (não especificada)" -ForegroundColor Yellow
+    }
+    
+    # RESUMO FINAL
+    Write-Host "`n=== USUÁRIO CRIADO COM SUCESSO ===" -ForegroundColor Magenta
+    Write-Host "Nome: $DisplayName" -ForegroundColor White
+    Write-Host "UPN: $UserPrincipalName" -ForegroundColor White
+    Write-Host "ID: $($NewUser.id)" -ForegroundColor White
+    Write-Host "Senha temporária: $TempPassword" -ForegroundColor Yellow
+    Write-Host "Deve alterar senha no próximo login: Sim" -ForegroundColor White
+    
+    # Retorno estruturado para N8N
+    $Result = @{
+        success = $true
+        userId = $NewUser.id
+        userPrincipalName = $UserPrincipalName
+        displayName = $DisplayName
+        temporaryPassword = $TempPassword
+        message = "Usuário criado com sucesso"
+    }
+    
+    return ($Result | ConvertTo-Json -Depth 2)
+}
+catch {
+    Write-Host "`n=== ERRO NA CRIAÇÃO DO USUÁRIO ===" -ForegroundColor Red
+    Write-Host "Erro: $($_.Exception.Message)" -ForegroundColor Red
+    
+    $ErrorResult = @{
+        success = $false
+        error = $_.Exception.Message
+        message = "Falha na criação do usuário"
+    }
+    
+    return ($ErrorResult | ConvertTo-Json -Depth 2)
 }
 
-# Exemplos de uso (comentados)
+# ===============================================================================
+# EXEMPLO DE USO NO N8N
+# ===============================================================================
 <#
-# Exemplo 1: Usuário básico
-New-EntraUser -DisplayName "João Silva" -UserPrincipalName "joao.silva@empresa.com"
+# O LLM pode editar os placeholders assim:
+$FirstName = "João"
+$LastName = "Silva" 
+$Domain = "empresa.com"
+$JobTitle = "Desenvolvedor"
+$Department = "TI"
+$License = "ENTERPRISEPREMIUM"
+$Groups = @("Desenvolvedores", "TI_Geral")
+$ManagerEmail = "gerente@empresa.com"
 
-# Exemplo 2: Usuário completo
-New-EntraUser -DisplayName "Maria Santos" -UserPrincipalName "maria.santos@empresa.com" `
-              -GivenName "Maria" -Surname "Santos" -JobTitle "Analista" `
-              -Department "TI" -OfficeLocation "São Paulo" `
-              -MobilePhone "+5511999999999" -BusinessPhone "+551133333333" `
-              -ManagerUPN "gerente@empresa.com" `
-              -GroupNames @("Grupo_TI", "Todos_Funcionarios") `
-              -LicenseSku "ENTERPRISEPREMIUM" `
-              -ForcePasswordChange:$true
-
-# Exemplo 3: Execução via parâmetros do script
-# .\CreateUser.ps1 -DisplayName "Pedro Costa" -UserPrincipalName "pedro.costa@empresa.com" -JobTitle "Desenvolvedor"
+# Credenciais do Service Principal (configurar no N8N como variáveis de ambiente)
+$TenantId = $env:AZURE_TENANT_ID
+$ClientId = $env:AZURE_CLIENT_ID  
+$ClientSecret = $env:AZURE_CLIENT_SECRET
 #>
-
-# Verificar se foi chamado com parâmetros e executar
-if ($DisplayName -and $UserPrincipalName) {
-    $result = New-EntraUser
-    if ($result) {
-        Write-Host "`nUsuário criado com sucesso!" -ForegroundColor Green
-    }
-} else {
-    Write-Host "Script carregado. Use New-EntraUser ou execute com parâmetros -DisplayName e -UserPrincipalName" -ForegroundColor Yellow
-    Write-Host "Para ver exemplos, consulte os comentários no final do script." -ForegroundColor Cyan
-}
